@@ -6,7 +6,7 @@ from streamlit_mic_recorder import speech_to_text
 
 import chatbot
 
-st.set_page_config(page_title="Marty Voice", page_icon="🎙️")
+st.set_page_config(page_title="Marty", layout="centered")
 
 
 def get_bot() -> chatbot.ChatBot:
@@ -25,15 +25,15 @@ def render_turn(turn: dict, autoplay: bool) -> None:
     with st.chat_message(turn["role"]):
         st.write(turn["text"])
         for card in turn.get("cards", []):
-            st.markdown(f"**{card['title']}** — {card['merchant']} · {card['price']} · {card['rating']}  \n{card['affiliate_url']}")
+            with st.container(border=True):
+                st.markdown(f"**{card['title']}**")
+                st.write(f"{card['merchant']}  ·  {card['price']}  ·  {card['rating']}")
+                st.link_button("View deal", card["affiliate_url"])
         if turn.get("disclosure"):
             st.caption(turn["disclosure"])
         if turn.get("audio"):
             st.audio(turn["audio"], format="audio/mp3", autoplay=autoplay)
 
-
-st.title("🎙️ Marty Voice")
-st.caption("Dailymart's shopping assistant, powered by a local Ollama model.")
 
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -41,21 +41,30 @@ if "last_voice" not in st.session_state:
     st.session_state.last_voice = None
 
 with st.sidebar:
-    st.header("Settings")
+    st.subheader("Settings")
     chatbot.OLLAMA_HOST = st.text_input("Ollama host", chatbot.OLLAMA_HOST).rstrip("/")
-    chatbot.OLLAMA_MODEL = st.text_input("Ollama model", chatbot.OLLAMA_MODEL)
+    chatbot.OLLAMA_MODEL = st.text_input("Model", chatbot.OLLAMA_MODEL)
     speak_replies = st.toggle("Speak replies", value=True)
-    if st.button("Clear conversation"):
+    if st.button("Clear conversation", use_container_width=True):
         st.session_state.history = []
         st.session_state.bot = chatbot.ChatBot()
         st.rerun()
 
-st.write("Tap the mic and speak, or type below.")
-spoken = speech_to_text(language="en", start_prompt="🎙️ Speak", stop_prompt="⏹️ Stop", key="mic")
-typed = st.chat_input("Type a message")
+st.title("Marty")
+st.caption("Dailymart shopping assistant, running on a local Ollama model.")
 
-for index, turn in enumerate(st.session_state.history):
+for turn in st.session_state.history:
     render_turn(turn, autoplay=False)
+
+controls = st.container()
+with controls:
+    left, right = st.columns([1, 4])
+    with left:
+        spoken = speech_to_text(language="en", start_prompt="Speak", stop_prompt="Stop", key="mic")
+    with right:
+        st.caption("Tap Speak and talk, or type your message below.")
+
+typed = st.chat_input("Ask about products, deals, or affiliate links")
 
 message = typed or (spoken if spoken and spoken != st.session_state.last_voice else None)
 if spoken:
