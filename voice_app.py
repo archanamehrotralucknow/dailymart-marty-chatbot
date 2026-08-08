@@ -24,6 +24,13 @@ LISTENING = '<div class="status-line"><span class="dot"></span>Ready to listen</
 THINKING = '<div class="status-line"><span class="thinking"><span></span><span></span><span></span></span> Marty is thinking</div>'
 
 
+def secret(name: str, fallback: str) -> str:
+    try:
+        return st.secrets[name]
+    except Exception:
+        return fallback
+
+
 def get_bot() -> chatbot.ChatBot:
     if "bot" not in st.session_state:
         st.session_state.bot = chatbot.ChatBot()
@@ -59,8 +66,8 @@ if "last_voice" not in st.session_state:
 
 with st.sidebar:
     st.subheader("Settings")
-    chatbot.OLLAMA_HOST = st.text_input("Ollama host", chatbot.OLLAMA_HOST).rstrip("/")
-    chatbot.OLLAMA_MODEL = st.text_input("Model", chatbot.OLLAMA_MODEL)
+    chatbot.OLLAMA_HOST = st.text_input("Ollama host", secret("OLLAMA_HOST", chatbot.OLLAMA_HOST)).rstrip("/")
+    chatbot.OLLAMA_MODEL = st.text_input("Model", secret("OLLAMA_MODEL", chatbot.OLLAMA_MODEL))
     speak_replies = st.toggle("Speak replies", value=True)
     if st.button("Clear conversation", use_container_width=True):
         st.session_state.history = []
