@@ -8,6 +8,21 @@ import chatbot
 
 st.set_page_config(page_title="Marty", layout="centered")
 
+STYLE = """
+<style>
+@keyframes pulse { 0% { transform: scale(1); opacity: .9; } 50% { transform: scale(1.4); opacity: .4; } 100% { transform: scale(1); opacity: .9; } }
+@keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
+.status-line { display: flex; align-items: center; gap: .55rem; color: #6b7280; font-size: .9rem; }
+.status-line .dot { width: .7rem; height: .7rem; border-radius: 50%; background: #ef4444; animation: pulse 1.2s ease-in-out infinite; }
+.thinking span { display: inline-block; width: .45rem; height: .45rem; margin: 0 .1rem; border-radius: 50%; background: #9ca3af; animation: blink 1.4s infinite both; }
+.thinking span:nth-child(2) { animation-delay: .2s; }
+.thinking span:nth-child(3) { animation-delay: .4s; }
+</style>
+"""
+
+LISTENING = '<div class="status-line"><span class="dot"></span>Ready to listen</div>'
+THINKING = '<div class="status-line"><span class="thinking"><span></span><span></span><span></span></span> Marty is thinking</div>'
+
 
 def get_bot() -> chatbot.ChatBot:
     if "bot" not in st.session_state:
@@ -35,6 +50,8 @@ def render_turn(turn: dict, autoplay: bool) -> None:
             st.audio(turn["audio"], format="audio/mp3", autoplay=autoplay)
 
 
+st.markdown(STYLE, unsafe_allow_html=True)
+
 if "history" not in st.session_state:
     st.session_state.history = []
 if "last_voice" not in st.session_state:
@@ -56,13 +73,11 @@ st.caption("Dailymart shopping assistant, running on a local Ollama model.")
 for turn in st.session_state.history:
     render_turn(turn, autoplay=False)
 
-controls = st.container()
-with controls:
-    left, right = st.columns([1, 4])
-    with left:
-        spoken = speech_to_text(language="en", start_prompt="Speak", stop_prompt="Stop", key="mic")
-    with right:
-        st.caption("Tap Speak and talk, or type your message below.")
+left, right = st.columns([1, 4])
+with left:
+    spoken = speech_to_text(language="en", start_prompt="Speak", stop_prompt="Stop", key="mic")
+with right:
+    st.markdown(LISTENING, unsafe_allow_html=True)
 
 typed = st.chat_input("Ask about products, deals, or affiliate links")
 
@@ -71,9 +86,19 @@ if spoken:
     st.session_state.last_voice = spoken
 
 if message:
-    response = get_bot().handle_message(message)
     st.session_state.history.append({"role": "user", "text": message})
-    audio = speak(response["reply_text"]) if speak_replies else None
+    render_turn(st.session_state.history[-1], autoplay=False)
+
+    with st.chat_message("assistant"):
+        status = st.empty()
+        status.markdown(THINKING, unsafe_allow_html=True)
+        response = get_bot().handle_message(message)
+        audio = None
+        if speak_replies:
+            status.markdown('<div class="status-line">Generating voice</div>', unsafe_allow_html=True)
+            audio = speak(response["reply_text"])
+        status.empty()
+
     st.session_state.history.append({
         "role": "assistant",
         "text": response["reply_text"],
@@ -81,5 +106,4 @@ if message:
         "disclosure": response["affiliate_disclosure"],
         "audio": audio,
     })
-    render_turn(st.session_state.history[-2], autoplay=False)
     render_turn(st.session_state.history[-1], autoplay=True)
