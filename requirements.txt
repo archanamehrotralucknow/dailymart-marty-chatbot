@@ -1,3 +1,4 @@
+google-genai
 streamlit
 streamlit-mic-recorder
 SpeechRecognition

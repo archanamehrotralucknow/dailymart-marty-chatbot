@@ -25,10 +25,16 @@ THINKING = '<div class="status-line"><span class="thinking"><span></span><span><
 
 
 def secret(name: str, fallback: str) -> str:
+    """Read a Streamlit secret, falling back when it is missing OR blank."""
     try:
-        return st.secrets[name]
+        value = str(st.secrets[name]).strip()
     except Exception:
         return fallback
+    return value or fallback
+
+
+# Streamlit secrets win over the .env value chatbot.py loads at import time.
+chatbot.GEMINI_API_KEY = secret("GEMINI_API_KEY", chatbot.GEMINI_API_KEY)
 
 
 def get_bot() -> chatbot.ChatBot:
@@ -66,16 +72,35 @@ if "last_voice" not in st.session_state:
 
 with st.sidebar:
     st.subheader("Settings")
-    chatbot.OLLAMA_HOST = st.text_input("Ollama host", secret("OLLAMA_HOST", chatbot.OLLAMA_HOST)).rstrip("/")
-    chatbot.OLLAMA_MODEL = st.text_input("Model", secret("OLLAMA_MODEL", chatbot.OLLAMA_MODEL))
+    chatbot.GEMINI_MODEL = st.text_input("Gemini model", secret("GEMINI_MODEL", chatbot.GEMINI_MODEL))
+    chatbot.GEMINI_TIMEOUT = st.slider("Response timeout (s)", 15, 180, chatbot.GEMINI_TIMEOUT, 5)
+    if chatbot.GEMINI_API_KEY:
+        st.caption(f"API key loaded (…{chatbot.GEMINI_API_KEY[-4:]})")
+    else:
+        st.warning("No GEMINI_API_KEY found in .env or Streamlit secrets.")
     speak_replies = st.toggle("Speak replies", value=True)
     if st.button("Clear conversation", use_container_width=True):
         st.session_state.history = []
         st.session_state.bot = chatbot.ChatBot()
         st.rerun()
 
+    st.divider()
+    if st.button("Check AI connection", use_container_width=True):
+        st.session_state.conn = chatbot.check_connection()
+    conn = st.session_state.get("conn")
+    if conn:
+        if conn["ok"] and chatbot.GEMINI_MODEL in conn["models"]:
+            st.success(f"Connected · {len(conn['models'])} model(s) available")
+        elif conn["ok"]:
+            st.warning(
+                f"Key works, but '{chatbot.GEMINI_MODEL}' isn't in this key's model list. "
+                "Pick a model your key has access to."
+            )
+        else:
+            st.error(f"Gemini unreachable: {conn['reason']}")
+
 st.title("Marty")
-st.caption("Dailymart shopping assistant, running on a local Ollama model.")
+st.caption("Dailymart shopping assistant, powered by the Gemini API.")
 
 for turn in st.session_state.history:
     render_turn(turn, autoplay=False)

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from google import genai
+from google.genai import types
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -17,9 +18,44 @@ except ImportError:
     HTTPException = Exception
     BaseModel = object
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "30"))
+
+def _load_env_file(path: Path) -> None:
+    """Minimal .env loader so the CLI works without python-dotenv installed."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+_load_env_file(Path(__file__).resolve().parent / ".env")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "60"))
+
+_client_cache: Dict[tuple, genai.Client] = {}
+
+
+def get_client() -> Optional[genai.Client]:
+    """Return a cached client for the current key, or None if unconfigured."""
+    if not GEMINI_API_KEY:
+        return None
+    cache_key = (GEMINI_API_KEY, GEMINI_TIMEOUT)
+    client = _client_cache.get(cache_key)
+    if client is None:
+        client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            # google-genai expects milliseconds.
+            http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT * 1000),
+        )
+        _client_cache[cache_key] = client
+    return client
 
 
 class Intent:
@@ -118,49 +154,97 @@ def search_products(query: str) -> List[Dict[str, Any]]:
     return [item for _, item in scored[:5]]
 
 
+def _model_names(client: genai.Client) -> List[str]:
+    # The API returns fully qualified names like "models/gemini-3.7-flash".
+    return sorted(
+        (model.name or "").removeprefix("models/")
+        for model in client.models.list()
+        if model.name
+    )
+
+
 def available_models() -> List[str]:
+    client = get_client()
+    if client is None:
+        return []
     try:
-        with urllib.request.urlopen(f"{OLLAMA_HOST}/api/tags", timeout=5) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            return [model["name"] for model in data.get("models", []) if model.get("name")]
+        return _model_names(client)
     except Exception:
         return []
 
 
-def ask_ollama(messages: List[Dict[str, str]], model: Optional[str] = None) -> Optional[str]:
-    model = model or OLLAMA_MODEL
-    payload = {"model": model, "messages": messages, "stream": False, "options": {"temperature": 0.7}}
-    request = urllib.request.Request(
-        f"{OLLAMA_HOST}/api/chat",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+def check_connection() -> Dict[str, Any]:
+    """Probe the Gemini API with the configured key. Returns reachability, models, and a reason."""
+    client = get_client()
+    if client is None:
+        return {"ok": False, "models": [], "reason": "No GEMINI_API_KEY configured"}
     try:
-        with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT) as response:
-            data = json.loads(response.read().decode("utf-8"))
-            return data.get("message", {}).get("content", "").strip() or None
-    except urllib.error.HTTPError as error:
-        if error.code == 404 and model == OLLAMA_MODEL:
-            fallback = next(iter(available_models()), None)
-            if fallback and fallback != model:
-                return ask_ollama(messages, fallback)
+        return {"ok": True, "models": _model_names(client), "reason": ""}
+    except Exception as error:  # noqa: BLE001
+        return {"ok": False, "models": [], "reason": str(error)}
+
+
+LAST_ERROR = ""
+
+
+def to_gemini_contents(messages: List[Dict[str, str]]) -> List[types.Content]:
+    """Convert the internal role/content turns to Gemini contents ('assistant' becomes 'model')."""
+    contents = []
+    for message in messages:
+        text = message.get("content") or ""
+        if not text:
+            continue
+        role = "model" if message.get("role") == "assistant" else "user"
+        contents.append(types.Content(role=role, parts=[types.Part(text=text)]))
+    return contents
+
+
+def ask_gemini(
+    messages: List[Dict[str, str]],
+    system_instruction: str = SYSTEM_PROMPT,
+    model: Optional[str] = None,
+) -> Optional[str]:
+    global LAST_ERROR
+    client = get_client()
+    if client is None:
+        LAST_ERROR = "No GEMINI_API_KEY configured"
         return None
-    except Exception:
+    try:
+        response = client.models.generate_content(
+            model=model or GEMINI_MODEL,
+            contents=to_gemini_contents(messages),
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.7,
+            ),
+        )
+    except Exception as error:  # noqa: BLE001
+        LAST_ERROR = str(error)
         return None
+    LAST_ERROR = ""
+    return (response.text or "").strip() or None
 
 
 def generate_reply(history: List[Dict[str, str]], context: str, user_message: str) -> str:
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"Context: {context or 'No recent catalog or FAQ context available.'}"},
-    ]
-    messages.extend(history[-6:])
+    # Gemini takes system text separately, so the context line rides along with the persona.
+    system_instruction = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"Context: {context or 'No recent catalog or FAQ context available.'}"
+    )
+    messages = list(history[-6:])
     messages.append({"role": "user", "content": user_message})
-    reply = ask_ollama(messages)
+    reply = ask_gemini(messages, system_instruction)
     if reply:
         return reply
-    return "I can't reach the local AI right now. Please make sure Ollama is running with a model pulled, then try again."
+    if not GEMINI_API_KEY:
+        return "I'm not configured yet — set GEMINI_API_KEY in .env (or Streamlit secrets) and try again."
+    if "RESOURCE_EXHAUSTED" in LAST_ERROR or "429" in LAST_ERROR:
+        return "My Gemini quota is exhausted right now. Check your usage limits at aistudio.google.com, then try again."
+    if "API_KEY_INVALID" in LAST_ERROR or "API key not valid" in LAST_ERROR:
+        return "My Gemini API key was rejected. Please check GEMINI_API_KEY and try again."
+    if "NOT_FOUND" in LAST_ERROR or "not found" in LAST_ERROR:
+        return f"The model '{GEMINI_MODEL}' isn't available to this API key. Pick a different model in Settings."
+    return "I can't reach Gemini right now. Please check your network and try again."
 
 
 @dataclass
